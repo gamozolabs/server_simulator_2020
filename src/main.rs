@@ -21,7 +21,7 @@ pub enum ProcessorType {
 }
 
 /// A processor
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Processor {
     /// Manufacturer of the hardware
     manufacturer: &'static str,
@@ -99,7 +99,7 @@ impl MemoryType {
 }
 
 /// A stick of RAM
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Memory {
     /// Manufacturer of the hardware
     manufacturer: &'static str,
@@ -124,10 +124,11 @@ pub enum MotherboardFormFactor {
     B11SRE,
     B11SPE,
     B11DPE,
+    X11QPHp,
 }
 
 /// A motherboard
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Motherboard {
     /// Manufacturer of the hardware
     manufacturer: &'static str,
@@ -177,7 +178,7 @@ pub enum BladeType {
 
 /// A single blade unit part of a larger blade server, or a complete system
 /// for example a whole 1U server.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Blade {
     /// Manufacturer of the hardware
     manufacturer: &'static str,
@@ -201,7 +202,7 @@ pub struct Blade {
 
 /// For blade servers that have multiple `Blade`s, they will go into a
 /// `System`
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct System {
     /// Manufacturer of the hardware
     manufacturer: &'static str,
@@ -290,7 +291,25 @@ impl System {
             let motherboard = blade.motherboard.as_ref().unwrap();
 
             acc += motherboard.processors.iter().fold(0f64, |acc, x| {
-                acc + x.cores as f64 * x.clock_rate as f64 * 16. * 2. *
+                acc + x.cores as f64 * x.avx512_rate.unwrap_or(0.) as f64 * 16. * 2. *
+                    x.avx512_fma_units.unwrap_or(0) as f64
+            });
+        }
+
+        acc
+    }
+    
+    /// Compute the max number of single-precision FLOPS using AVX-512 all-core
+    /// turbo FMA
+    pub fn turbo_sp_float_fma_gflops(&self) -> f64 {
+        let mut acc = 0f64;
+
+        // Go through each blade in the system
+        for blade in &self.blades {
+            let motherboard = blade.motherboard.as_ref().unwrap();
+
+            acc += motherboard.processors.iter().fold(0f64, |acc, x| {
+                acc + x.cores as f64 * x.avx512_turbo_rate.unwrap_or(0.) as f64 * 16. * 2. *
                     x.avx512_fma_units.unwrap_or(0) as f64
             });
         }
@@ -312,33 +331,41 @@ fn main() -> serde_json::Result<()> {
         for _ in 0..100000 {
             if let Some(system) = database.random_system() {
                 if system.ram() / system.threads() as u64
-                        >= (3 * 1024 * 1024 * 1024) {
-                    systems.push(system);
+                        >= (4 * 1024 * 1024 * 1024) {
+
+                    if system.price() > 35000. {
+                        continue;
+                    }
+
+                    if !systems.contains(&system) {
+                        systems.push(system);
+                    }
                 }
             }
         }
 
         systems.sort_by(|x, y| {
-            (x.sp_float_fma_gflops() / x.price())
-                .partial_cmp(&(y.sp_float_fma_gflops() / y.price()))
+            (x.turbo_sp_float_fma_gflops() / x.price())
+                .partial_cmp(&(y.turbo_sp_float_fma_gflops() / y.price()))
                 .unwrap()
         });
 
-        systems.drain(0..systems.len() - 5);
+        systems.drain(..systems.len()-50);
 
         eprint!("---\n");
-        for system in &systems {
+        for (ii, system) in systems.iter().enumerate() {
             let gib = system.ram() as f64 / 1024. / 1024. / 1024.;
-            eprint!("{:4}C / {:4}T | {:7.2} GFLOPS | {:8.2} GiB | ${:10.2} | {:10.6}\n",
-                system.cores(),
-                system.threads(), system.sp_float_fma_gflops(), gib,
+            eprint!("{:3} | {:4}C / {:4}T | {:9.2} base GFLOPS | {:9.2} turbo GFLOPS | {:8.2} GiB | ${:10.2} | {:10.6} base | {:10.6} turbo\n",
+                ii, system.cores(),
+                system.threads(), system.sp_float_fma_gflops(),
+                system.turbo_sp_float_fma_gflops(),
+                gib,
                 system.price(),
-                system.sp_float_fma_gflops() / system.price());
+                system.sp_float_fma_gflops() / system.price(),
+                system.turbo_sp_float_fma_gflops() / system.price());
 
-            std::fs::write("best.txt", format!("{:#?}\n", system)).unwrap();
+            std::fs::write(format!("best{}.txt", ii), format!("{:#?}\n", system)).unwrap();
         }
     }
-
-    Ok(())
 }
 
